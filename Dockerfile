@@ -5,6 +5,8 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     ffmpeg \
     yt-dlp \
     curl \
+    gcc \
+    python3-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # ── App directory ──────────────────────────────────────────────────────────────
