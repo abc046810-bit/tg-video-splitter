@@ -1,25 +1,26 @@
 # Video Tool Bot
 
-A production-ready Telegram bot for splitting and merging videos, built with Python and FFmpeg. Optimized for deployment on Render Free Plan.
+Owner-only Telegram bot for splitting and merging videos. Supports files up to **2 GB** via Pyrogram MTProto.
 
 ## Features
 
-- **Split**: Divide any video into clips of a chosen duration (5s, 10s, 20s, 30s, 60s, or custom)
-- **Merge**: Combine multiple clips into a single video, preserving exact upload order
-- **Owner-only access**: Only the configured owner can use the bot
-- **Quality preservation**: Uses FFmpeg copy mode when possible; falls back to high-quality re-encode
-- **Live progress updates**: Real-time status messages during processing
-- **Automatic cleanup**: All temporary files are removed after processing or on cancellation
-- **Modular architecture**: Easy to extend with new features
+- **Split** videos into clips of any duration
+- **Merge** multiple clips in exact upload order
+- **2 GB file support** via Pyrogram MTProto (no Bot API download limits)
+- Live progress bars with speed and ETA
+- Owner-only access
+- Automatic cleanup of temp files
+- Render Free Plan compatible
 
-## Supported Formats
+## Commands
 
-- MP4
-- MKV
-- AVI
-- MOV
-- WEBM
-- M4V
+| Command | Description |
+|---------|-------------|
+| `/start` | Show welcome message |
+| `/split` | Split a video into clips |
+| `/merge` | Merge multiple clips |
+| `/cancel` | Cancel operation and cleanup |
+| `/help` | Show help |
 
-## Project Structure
+## Environment Variables
 
