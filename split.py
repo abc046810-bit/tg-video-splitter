@@ -1,114 +1,172 @@
-# File 5 : split.py
+"""Video split handler and logic.
 
-import os
-import math
-import subprocess
+Manages the /split conversation flow and delegates FFmpeg work.
+"""
 
-from telegram import Update
-from telegram.ext import ContextTypes
+import logging
+from pathlib import Path
 
-from config import SPLIT_DIR
+from telegram import InlineKeyboardButton, InlineKeyboardMarkup, Update
+from telegram.ext import ContextTypes, ConversationHandler
+
+import config
+from ffmpeg_utils import FFmpegError, split_video
+from helpers import cleanup_path, cleanup_session, ensure_user_dir, is_supported_format
+from states import BotState
+
+logger = logging.getLogger(__name__)
+
+DURATION_OPTIONS = {
+    "5": 5,
+    "10": 10,
+    "20": 20,
+    "30": 30,
+    "60": 60,
+    "custom": None,
+}
 
 
-def get_duration(video_path: str) -> float:
-    cmd = [
-        "ffprobe",
-        "-v", "error",
-        "-show_entries", "format=duration",
-        "-of", "default=noprint_wrappers=1:nokey=1",
-        video_path,
+def build_duration_keyboard() -> InlineKeyboardMarkup:
+    """Build inline keyboard for duration selection."""
+    buttons = [
+        [
+            InlineKeyboardButton("5 sec", callback_data="5"),
+            InlineKeyboardButton("10 sec", callback_data="10"),
+            InlineKeyboardButton("20 sec", callback_data="20"),
+        ],
+        [
+            InlineKeyboardButton("30 sec", callback_data="30"),
+            InlineKeyboardButton("60 sec", callback_data="60"),
+            InlineKeyboardButton("Custom", callback_data="custom"),
+        ],
     ]
+    return InlineKeyboardMarkup(buttons)
 
-    result = subprocess.run(
-        cmd,
-        capture_output=True,
-        text=True,
+
+async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Entry point for /split command."""
+    cleanup_session(context)
+    await update.effective_message.reply_text(
+        "Select clip duration:",
+        reply_markup=build_duration_keyboard(),
     )
+    return BotState.SPLIT_SELECT_DURATION
 
-    return float(result.stdout.strip())
+
+async def split_duration_callback(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle duration selection from inline keyboard."""
+    query = update.callback_query
+    await query.answer()
+    choice = query.data
+
+    if choice == "custom":
+        await query.edit_message_text("Enter duration in seconds.\nExample: 17")
+        return BotState.SPLIT_ENTER_CUSTOM
+
+    duration = DURATION_OPTIONS.get(choice)
+    if duration is None:
+        await query.edit_message_text("Invalid selection. Please try /split again.")
+        return ConversationHandler.END
+
+    context.user_data["split_duration"] = duration
+    await query.edit_message_text(
+        f"Duration set to {duration} seconds.\nNow upload your video."
+    )
+    return BotState.SPLIT_WAIT_VIDEO
 
 
-def split_video(video_path: str, seconds: int, output_dir: str):
-
-    os.makedirs(output_dir, exist_ok=True)
-
-    total = get_duration(video_path)
-
-    clips = math.ceil(total / seconds)
-
-    output_files = []
-
-    for i in range(clips):
-
-        start = i * seconds
-
-        out = os.path.join(
-            output_dir,
-            f"clip_{i+1:04d}.mp4",
+async def split_custom_duration(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle custom duration input."""
+    text = update.effective_message.text.strip()
+    try:
+        duration = int(text)
+        if duration < 1:
+            raise ValueError
+    except ValueError:
+        await update.effective_message.reply_text(
+            "Invalid duration. Please enter a positive integer (e.g., 17)."
         )
+        return BotState.SPLIT_ENTER_CUSTOM
 
-        cmd = [
-            "ffmpeg",
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-ss",
-            str(start),
-            "-i",
-            video_path,
-            "-t",
-            str(seconds),
-            "-c",
-            "copy",
-            "-y",
-            out,
-        ]
-
-        subprocess.run(cmd)
-
-        if os.path.exists(out):
-            output_files.append(out)
-
-    return output_files
-
-
-async def process_split(
-    update: Update,
-    context: ContextTypes.DEFAULT_TYPE,
-    video_path: str,
-    duration: int,
-):
-
-    msg = await update.message.reply_text(
-        "Processing..."
+    context.user_data["split_duration"] = duration
+    await update.effective_message.reply_text(
+        f"Duration set to {duration} seconds.\nNow upload your video."
     )
+    return BotState.SPLIT_WAIT_VIDEO
 
-    folder = os.path.join(
-        SPLIT_DIR,
-        os.path.basename(video_path).split(".")[0],
-    )
 
-    clips = split_video(
-        video_path,
-        duration,
-        folder,
-    )
+def _get_video_from_message(message):
+    """Extract video or document object from message."""
+    if message.video:
+        return message.video
+    if message.document:
+        return message.document
+    return None
 
-    total = len(clips)
 
-    for index, clip in enumerate(clips, start=1):
+async def split_receive_video(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Handle video upload for splitting."""
+    message = update.effective_message
+    video = _get_video_from_message(message)
 
-        await context.bot.send_video(
-            chat_id=update.effective_chat.id,
-            video=open(clip, "rb"),
-            supports_streaming=True,
-            caption=f"Clip {index}/{total}",
+    if video is None:
+        await message.reply_text("Please upload a video file.")
+        return BotState.SPLIT_WAIT_VIDEO
+
+    file_name = video.file_name or f"video_{video.file_id}.mp4"
+
+    if not is_supported_format(file_name):
+        await message.reply_text(
+            f"Unsupported format. Supported: {', '.join(sorted(config.SUPPORTED_FORMATS))}"
         )
+        return BotState.SPLIT_WAIT_VIDEO
 
-        await msg.edit_text(
-            f"Sent {index}/{total}"
-        )
+    duration = context.user_data.get("split_duration")
+    if not duration:
+        await message.reply_text("Duration not set. Please restart with /split.")
+        return ConversationHandler.END
 
-    await msg.edit_text(
-        "✅ Split Finished."
-    )
+    user_id = update.effective_user.id
+    user_download_dir = ensure_user_dir(config.DOWNLOADS_DIR, user_id)
+    user_split_dir = ensure_user_dir(config.SPLIT_DIR, user_id)
+
+    input_path = user_download_dir / file_name
+
+    try:
+        await message.reply_text("Downloading...")
+        file = await context.bot.get_file(video.file_id)
+        await file.download_to_drive(str(input_path))
+
+        if not input_path.exists():
+            raise FFmpegError("Download failed: file not found after download.")
+
+        await message.reply_text("Splitting...")
+
+        async def on_clip_ready(clip_path: Path, current: int, total: int) -> None:
+            """Send each clip immediately after it is created."""
+            try:
+                with open(clip_path, "rb") as f:
+                    await message.reply_video(
+                        video=f,
+                        caption=f"Clip {current}/{total}",
+                        supports_streaming=True,
+                    )
+            except Exception as exc:
+                logger.error("Failed to send clip %s: %s", clip_path, exc)
+                await message.reply_text(f"Failed to send clip {current}/{total}.")
+
+        await split_video(input_path, user_split_dir, duration, on_clip_ready)
+
+        await message.reply_text("Split Finished.")
+
+    except FFmpegError as exc:
+        logger.error("Split error: %s", exc)
+        await message.reply_text(f"Error: {exc}")
+    except Exception as exc:
+        logger.exception("Unexpected split error")
+        await message.reply_text(f"Unexpected error: {exc}")
+    finally:
+        cleanup_path(input_path)
+        cleanup_path(user_split_dir)
+
+    return ConversationHandler.END
