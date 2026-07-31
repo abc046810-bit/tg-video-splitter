@@ -1,8 +1,4 @@
-"""Helper utilities for the Video Tool Bot.
-
-Provides common functions for file management, validation,
-and Telegram message helpers.
-"""
+"""Helper utilities for the Video Tool Bot."""
 
 import os
 import shutil
@@ -56,9 +52,11 @@ def cleanup_path(path: Optional[Path]) -> None:
         logger.warning("Failed to cleanup %s: %s", path, exc)
 
 
-def cleanup_session(context: ContextTypes.DEFAULT_TYPE) -> None:
+def cleanup_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Remove all temporary files associated with the current user session."""
-    user_id = context.effective_user.id if context.effective_user else "unknown"
+    user = update.effective_user
+    user_id = user.id if user else "unknown"
+
     session_dirs = [
         config.DOWNLOADS_DIR / str(user_id),
         config.SPLIT_DIR / str(user_id),
@@ -67,13 +65,11 @@ def cleanup_session(context: ContextTypes.DEFAULT_TYPE) -> None:
     ]
     for d in session_dirs:
         cleanup_path(d)
-    # Clear merge list if present
-    if "merge_clips" in context.user_data:
-        del context.user_data["merge_clips"]
-    if "merge_count" in context.user_data:
-        del context.user_data["merge_count"]
-    if "split_duration" in context.user_data:
-        del context.user_data["split_duration"]
+
+    # Clear session data
+    for key in ("merge_clips", "merge_count", "split_duration"):
+        context.user_data.pop(key, None)
+
     logger.info("Session cleaned for user %s", user_id)
 
 
