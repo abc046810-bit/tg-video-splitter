@@ -1,20 +1,18 @@
-# File 8 : states.py
+"""Conversation states for the Telegram bot.
 
-from collections import defaultdict
+Used by ConversationHandler to manage multi-step flows.
+"""
 
-
-class UserSession:
-
-    def __init__(self):
-
-        self.mode = None
-        self.duration = None
-
-        self.waiting_custom_duration = False
-
-        self.current_video = None
-
-        self.merge_files = []
+from enum import IntEnum, auto
 
 
-USERS = defaultdict(UserSession)
+class BotState(IntEnum):
+    """Enumeration of conversation states."""
+
+    IDLE = auto()
+    SPLIT_SELECT_DURATION = auto()
+    SPLIT_ENTER_CUSTOM = auto()
+    SPLIT_WAIT_VIDEO = auto()
+    SPLIT_PROCESSING = auto()
+    MERGE_COLLECT = auto()
+    MERGE_PROCESSING = auto()
