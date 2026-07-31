@@ -1,7 +1,4 @@
-"""Video merge handler and logic.
-
-Manages the /merge conversation flow and delegates FFmpeg work.
-"""
+"""Video merge handler and logic."""
 
 import logging
 from pathlib import Path
@@ -19,7 +16,7 @@ logger = logging.getLogger(__name__)
 
 async def merge_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Entry point for /merge command."""
-    cleanup_session(context)
+    cleanup_session(update, context)
     context.user_data["merge_clips"] = []
     context.user_data["merge_count"] = 0
     await update.effective_message.reply_text(
@@ -61,7 +58,6 @@ async def merge_receive_clip(update: Update, context: ContextTypes.DEFAULT_TYPE)
     count = context.user_data.get("merge_count", 0) + 1
     context.user_data["merge_count"] = count
 
-    # Save with sequential numbering to preserve order regardless of filename
     ext = Path(file_name).suffix or ".mp4"
     clip_path = user_merge_dir / f"{count:04d}{ext}"
 
@@ -87,7 +83,7 @@ async def merge_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
 
     if not clips:
         await message.reply_text("No clips received. Merge cancelled.")
-        cleanup_session(context)
+        cleanup_session(update, context)
         return ConversationHandler.END
 
     user_id = update.effective_user.id
@@ -125,9 +121,7 @@ async def merge_done(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     finally:
         cleanup_path(user_merge_dir)
         cleanup_path(user_temp_dir)
-        if "merge_clips" in context.user_data:
-            del context.user_data["merge_clips"]
-        if "merge_count" in context.user_data:
-            del context.user_data["merge_count"]
+        context.user_data.pop("merge_clips", None)
+        context.user_data.pop("merge_count", None)
 
     return ConversationHandler.END
