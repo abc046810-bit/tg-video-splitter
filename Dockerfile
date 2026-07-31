@@ -1,30 +1,26 @@
+# Video Tool Bot - Docker Image
+# Optimized for Render Free Plan deployment
+
 FROM python:3.12-slim
 
-# ── System dependencies ────────────────────────────────────────────────────────
-RUN apt-get update && apt-get install -y --no-install-recommends \
-    ffmpeg \
-    yt-dlp \
-    curl \
-    gcc \
-    python3-dev \
-    && rm -rf /var/lib/apt/lists/*
+# Install FFmpeg and FFprobe
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends ffmpeg && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
 
-# ── App directory ──────────────────────────────────────────────────────────────
+# Set working directory
 WORKDIR /app
 
-# ── Python dependencies ────────────────────────────────────────────────────────
+# Copy requirements first for layer caching
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# ── Copy source ────────────────────────────────────────────────────────────────
+# Copy application code
 COPY . .
 
-# ── Runtime directories ────────────────────────────────────────────────────────
-RUN mkdir -p /tmp/video_splitter data logs
+# Create necessary directories
+RUN mkdir -p downloads split merge temp logs
 
-# ── Non-root user ──────────────────────────────────────────────────────────────
-RUN useradd -m -u 1000 botuser && chown -R botuser /app /tmp/video_splitter
-USER botuser
-
-# ── Entrypoint ─────────────────────────────────────────────────────────────────
-CMD ["python", "main.py"]
+# Run the bot
+CMD ["python", "bot.py"]
