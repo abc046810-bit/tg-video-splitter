@@ -1,7 +1,4 @@
-"""Video split handler and logic.
-
-Manages the /split conversation flow and delegates FFmpeg work.
-"""
+"""Video split handler and logic."""
 
 import logging
 from pathlib import Path
@@ -45,7 +42,7 @@ def build_duration_keyboard() -> InlineKeyboardMarkup:
 
 async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
     """Entry point for /split command."""
-    cleanup_session(context)
+    cleanup_session(update, context)
     await update.effective_message.reply_text(
         "Select clip duration:",
         reply_markup=build_duration_keyboard(),
