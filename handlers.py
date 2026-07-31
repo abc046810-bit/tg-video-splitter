@@ -1,179 +1,141 @@
-# File 4: handlers.py
+"""Telegram bot handlers.
 
-import os
+Registers all command handlers, conversation handlers, and middleware.
+"""
 
-from telegram import (
-    Update,
-    InlineKeyboardButton,
-    InlineKeyboardMarkup,
+import logging
+
+from telegram import Update
+from telegram.ext import (
+    Application,
+    CallbackQueryHandler,
+    CommandHandler,
+    ConversationHandler,
+    MessageHandler,
+    filters,
 )
 
-from telegram.ext import ContextTypes
-
-from config import (
-    OWNER_ID,
-    DOWNLOAD_DIR,
-    MERGE_DIR,
+import config
+from helpers import cleanup_session, send_unauthorized
+from merge import merge_command, merge_done, merge_receive_clip
+from split import (
+    split_command,
+    split_custom_duration,
+    split_duration_callback,
+    split_receive_video,
 )
+from states import BotState
 
-# user states
-USER_STATE = {}
-MERGE_FILES = {}
+logger = logging.getLogger(__name__)
 
-
-def is_owner(user_id: int) -> bool:
-    return user_id == OWNER_ID
+# Owner-only filter using effective_user
+OWNER_FILTER = filters.User(user_id=config.OWNER_ID)
 
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_user.id):
-        return
-
-    USER_STATE[update.effective_user.id] = {
-        "mode": None,
-        "duration": None,
-    }
-
-    await update.message.reply_text(
-        "Video Tool Bot Ready ✅\n\n"
-        "/split - Split Video\n"
-        "/merge - Merge Videos"
+async def start_command(update: Update, _context) -> None:
+    """Handle /start command."""
+    await update.effective_message.reply_text(
+        "Video Tool Bot Ready\n\n"
+        "Commands:\n"
+        "/split\n"
+        "/merge\n"
+        "/cancel\n"
+        "/help"
     )
 
 
-async def split_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_user.id):
-        return
+async def help_command(update: Update, _context) -> None:
+    """Handle /help command."""
+    await update.effective_message.reply_text(
+        "Available commands:\n\n"
+        "/split - Split a video into clips\n"
+        "/merge - Merge multiple clips into one video\n"
+        "/cancel - Cancel current operation and cleanup\n"
+        "/help - Show this help message"
+    )
 
-    keyboard = [
-        [
-            InlineKeyboardButton("5 sec", callback_data="split_5"),
-            InlineKeyboardButton("10 sec", callback_data="split_10"),
+
+async def cancel_command(update: Update, context) -> int:
+    """Handle /cancel command to abort any ongoing operation."""
+    cleanup_session(context)
+    await update.effective_message.reply_text("Cancelled. All temporary files removed.")
+    return ConversationHandler.END
+
+
+async def unauthorized_handler(update: Update, _context) -> None:
+    """Catch-all handler for non-owner messages outside conversations."""
+    await send_unauthorized(update)
+
+
+async def owner_callback_query_handler(update: Update, context) -> int:
+    """Enforce owner-only access on callback queries and route to split handler."""
+    if update.effective_user and update.effective_user.id == config.OWNER_ID:
+        return await split_duration_callback(update, context)
+    await send_unauthorized(update)
+    return ConversationHandler.END
+
+
+def setup_handlers(application: Application) -> None:
+    """Register all handlers with the application."""
+
+    # Split conversation handler (owner only)
+    split_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("split", split_command, filters=OWNER_FILTER)
         ],
-        [
-            InlineKeyboardButton("20 sec", callback_data="split_20"),
-            InlineKeyboardButton("30 sec", callback_data="split_30"),
+        states={
+            BotState.SPLIT_SELECT_DURATION: [
+                CallbackQueryHandler(owner_callback_query_handler),
+            ],
+            BotState.SPLIT_ENTER_CUSTOM: [
+                MessageHandler(
+                    filters.TEXT & ~filters.COMMAND & OWNER_FILTER,
+                    split_custom_duration,
+                ),
+            ],
+            BotState.SPLIT_WAIT_VIDEO: [
+                MessageHandler(
+                    filters.VIDEO & OWNER_FILTER,
+                    split_receive_video,
+                ),
+                MessageHandler(
+                    filters.Document.VIDEO & OWNER_FILTER,
+                    split_receive_video,
+                ),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_command, filters=OWNER_FILTER)],
+        allow_reentry=True,
+    )
+
+    # Merge conversation handler (owner only)
+    merge_conv = ConversationHandler(
+        entry_points=[
+            CommandHandler("merge", merge_command, filters=OWNER_FILTER)
         ],
-        [
-            InlineKeyboardButton("Custom", callback_data="split_custom"),
-        ],
-    ]
-
-    await update.message.reply_text(
-        "Select Clip Duration",
-        reply_markup=InlineKeyboardMarkup(keyboard),
+        states={
+            BotState.MERGE_COLLECT: [
+                MessageHandler(
+                    filters.VIDEO & OWNER_FILTER,
+                    merge_receive_clip,
+                ),
+                MessageHandler(
+                    filters.Document.VIDEO & OWNER_FILTER,
+                    merge_receive_clip,
+                ),
+                CommandHandler("done", merge_done, filters=OWNER_FILTER),
+            ],
+        },
+        fallbacks=[CommandHandler("cancel", cancel_command, filters=OWNER_FILTER)],
+        allow_reentry=True,
     )
 
+    application.add_handler(CommandHandler("start", start_command, filters=OWNER_FILTER))
+    application.add_handler(CommandHandler("help", help_command, filters=OWNER_FILTER))
+    application.add_handler(split_conv)
+    application.add_handler(merge_conv)
 
-async def merge_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_user.id):
-        return
-
-    user = update.effective_user.id
-
-    USER_STATE[user] = {
-        "mode": "merge",
-    }
-
-    MERGE_FILES[user] = []
-
-    await update.message.reply_text(
-        "Send all clips.\n\n"
-        "When finished send /done"
+    # Catch-all for non-owner users (must be last)
+    application.add_handler(
+        MessageHandler(~OWNER_FILTER, unauthorized_handler)
     )
-
-
-async def done_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_user.id):
-        return
-
-    await update.message.reply_text(
-        "Merge module will start here."
-    )
-
-
-async def cancel_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    if not is_owner(update.effective_user.id):
-        return
-
-    user = update.effective_user.id
-
-    USER_STATE.pop(user, None)
-    MERGE_FILES.pop(user, None)
-
-    await update.message.reply_text("Cancelled.")
-
-
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    query = update.callback_query
-    await query.answer()
-
-    user = query.from_user.id
-
-    if not is_owner(user):
-        return
-
-    data = query.data
-
-    if data.startswith("split_"):
-
-        duration = data.replace("split_", "")
-
-        USER_STATE[user] = {
-            "mode": "split",
-            "duration": duration,
-        }
-
-        if duration == "custom":
-            await query.edit_message_text(
-                "Send duration in seconds.\nExample:\n17"
-            )
-            return
-
-        await query.edit_message_text(
-            f"Duration : {duration} sec\n\nNow send video."
-        )
-
-
-async def video_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
-
-    if not is_owner(update.effective_user.id):
-        return
-
-    user = update.effective_user.id
-
-    state = USER_STATE.get(user)
-
-    if not state:
-        await update.message.reply_text(
-            "Use /split or /merge first."
-        )
-        return
-
-    file = (
-        update.message.video
-        or update.message.document
-    )
-
-    tg_file = await file.get_file()
-
-    save_path = os.path.join(
-        DOWNLOAD_DIR,
-        f"{file.file_unique_id}.mp4"
-    )
-
-    await tg_file.download_to_drive(save_path)
-
-    if state["mode"] == "split":
-
-        await update.message.reply_text(
-            "Video received.\nSplit module will start..."
-        )
-
-    elif state["mode"] == "merge":
-
-        MERGE_FILES[user].append(save_path)
-
-        await update.message.reply_text(
-            f"Clip Added : {len(MERGE_FILES[user])}"
-  )
