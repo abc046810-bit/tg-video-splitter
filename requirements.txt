@@ -1,5 +1,2 @@
 python-telegram-bot==21.10
 python-dotenv==1.0.1
-tgcrypto==1.2.5
-aiofiles==24.1.0
-psutil==6.1.1
