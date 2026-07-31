@@ -31,7 +31,7 @@ async def _run(cmd: List[str], timeout: int = 600) -> str:
         raise FFmpegError(f"Command timed out after {timeout}s")
 
     if proc.returncode != 0:
-        err = stderr.decode("utf-8", errors="ignore")[-500:]
+        err = stderr.decode("utf-8", errors="ignore")[-800:]
         raise FFmpegError(f"FFmpeg error (rc={proc.returncode}): {err}")
 
     return stdout.decode("utf-8", errors="ignore")
@@ -61,7 +61,10 @@ async def split_video(
     clip_duration: float,
     status_callback,
 ) -> List[Path]:
-    """Split video into clips using FFmpeg copy mode with H.264 fallback."""
+    """Split video into clips using accurate frame-level re-encoding.
+
+    Uses -preset ultrafast for speed while maintaining perfect accuracy.
+    """
     total_duration = await get_duration(input_path)
     total_clips = math.ceil(total_duration / clip_duration)
     ext = input_path.suffix or ".mp4"
@@ -75,36 +78,26 @@ async def split_video(
 
         await status_callback(f"Splitting... Part {idx + 1}/{total_clips}")
 
-        cmd_copy = [
+        # Accurate frame-level cutting with re-encode
+        # -ss after -i = accurate seek (decodes every frame)
+        # -preset ultrafast = fastest encoding, minimal CPU
+        cmd = [
             config.FFMPEG, "-y",
-            "-ss", str(start),
             "-i", str(input_path),
+            "-ss", str(start),
             "-t", str(duration),
-            "-c", "copy",
-            "-avoid_negative_ts", "make_zero",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "23",
+            "-c:a", "aac",
+            "-b:a", "192k",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
             "-fflags", "+genpts",
             str(output_path),
         ]
 
-        try:
-            await _run(cmd_copy, timeout=300)
-        except FFmpegError:
-            logger.warning("Copy split failed for part %d, re-encoding...", idx + 1)
-            cmd_encode = [
-                config.FFMPEG, "-y",
-                "-ss", str(start),
-                "-i", str(input_path),
-                "-t", str(duration),
-                "-c:v", "libx264",
-                "-preset", "fast",
-                "-crf", "18",
-                "-c:a", "aac",
-                "-b:a", "192k",
-                "-pix_fmt", "yuv420p",
-                str(output_path),
-            ]
-            await _run(cmd_encode, timeout=300)
-
+        await _run(cmd, timeout=600)
         clips.append(output_path)
 
     return clips
@@ -115,7 +108,10 @@ async def merge_videos(
     output_path: Path,
     status_callback,
 ) -> Path:
-    """Merge clips with FFmpeg concat demuxer."""
+    """Merge clips with FFmpeg concat demuxer using re-encode.
+
+    Re-encoding fixes all timestamp discontinuities and ensures smooth playback.
+    """
     if not clip_paths:
         raise FFmpegError("No clips provided")
 
@@ -127,33 +123,23 @@ async def merge_videos(
 
     await status_callback("Merging clips...")
 
-    cmd_copy = [
+    cmd = [
         config.FFMPEG, "-y",
         "-f", "concat",
         "-safe", "0",
         "-i", str(list_path),
-        "-c", "copy",
+        "-c:v", "libx264",
+        "-preset", "ultrafast",
+        "-crf", "23",
+        "-c:a", "aac",
+        "-b:a", "192k",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
         str(output_path),
     ]
 
     try:
-        await _run(cmd_copy, timeout=600)
-    except FFmpegError:
-        logger.warning("Copy merge failed, re-encoding...")
-        cmd_encode = [
-            config.FFMPEG, "-y",
-            "-f", "concat",
-            "-safe", "0",
-            "-i", str(list_path),
-            "-c:v", "libx264",
-            "-preset", "fast",
-            "-crf", "18",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-pix_fmt", "yuv420p",
-            str(output_path),
-        ]
-        await _run(cmd_encode, timeout=600)
+        await _run(cmd, timeout=900)
     finally:
         list_path.unlink(missing_ok=True)
 
