@@ -76,6 +76,9 @@ async def main() -> None:
     )
 
     async with app:
+        # Clear any old webhook so polling works on Render
+        await app.delete_webhook(drop_pending_updates=True)
+
         me = await app.get_me()
         logger.info(f"Bot started as @{me.username} (ID: {me.id})")
 
