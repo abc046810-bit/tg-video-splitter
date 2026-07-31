@@ -9,7 +9,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import os
-from aiohttp import web
+from aiohttp import web, ClientSession
 
 from pyrogram import Client
 
@@ -53,6 +53,18 @@ async def start_health_server() -> web.AppRunner:
     return runner
 
 
+async def clear_telegram_webhook(bot_token: str) -> None:
+    """Clear any old Bot API webhook so updates reach the bot."""
+    url = f"https://api.telegram.org/bot{bot_token}/deleteWebhook?drop_pending_updates=true"
+    try:
+        async with ClientSession() as session:
+            async with session.get(url) as resp:
+                data = await resp.json()
+                logger.info(f"Webhook clear result: {data}")
+    except Exception as e:
+        logger.warning(f"Could not clear webhook: {e}")
+
+
 async def main() -> None:
     if not ffmpeg_available():
         logger.error("FFmpeg or ffprobe is not installed / not on PATH. Aborting.")
@@ -67,6 +79,9 @@ async def main() -> None:
     # Health server (for Render Web Service)
     health_runner = await start_health_server()
 
+    # Clear old webhook (Bot API)
+    await clear_telegram_webhook(settings.bot_token)
+
     app = Client(
         name="video_splitter_bot",
         api_id=settings.api_id,
@@ -76,9 +91,6 @@ async def main() -> None:
     )
 
     async with app:
-        # Clear any old webhook so polling works on Render
-        await app.delete_webhook(drop_pending_updates=True)
-
         me = await app.get_me()
         logger.info(f"Bot started as @{me.username} (ID: {me.id})")
 
