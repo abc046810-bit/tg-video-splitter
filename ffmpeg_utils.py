@@ -3,8 +3,9 @@
 import asyncio
 import logging
 import math
+import re
 from pathlib import Path
-from typing import List
+from typing import List, Optional
 
 import config
 
@@ -55,20 +56,67 @@ async def get_duration(path: Path) -> float:
     return duration
 
 
+async def get_video_bitrate(path: Path) -> Optional[int]:
+    """Return video stream bitrate in bits per second."""
+    cmd = [
+        config.FFPROBE, "-v", "error",
+        "-select_streams", "v:0",
+        "-show_entries", "stream=bit_rate",
+        "-of", "default=noprint_wrappers=1:nokey=1",
+        str(path),
+    ]
+    out = await _run(cmd, timeout=30)
+    out = out.strip()
+    if out and out != "N/A":
+        try:
+            return int(out)
+        except ValueError:
+            pass
+    return None
+
+
+def _build_reencode_cmd(
+    input_path: Path,
+    output_path: Path,
+    start: float,
+    duration: float,
+    bitrate: Optional[int],
+) -> List[str]:
+    """Build re-encode command that preserves original bitrate."""
+    cmd = [
+        config.FFMPEG, "-y",
+        "-ss", str(start),
+        "-i", str(input_path),
+        "-t", str(duration),
+        "-c:v", "libx264",
+        "-preset", "fast",
+    ]
+    if bitrate:
+        cmd += ["-b:v", str(bitrate)]
+    else:
+        cmd += ["-crf", "23"]
+    cmd += [
+        "-c:a", "aac",
+        "-b:a", "128k",
+        "-pix_fmt", "yuv420p",
+        "-movflags", "+faststart",
+        str(output_path),
+    ]
+    return cmd
+
+
 async def split_video(
     input_path: Path,
     output_dir: Path,
     clip_duration: float,
     status_callback,
 ) -> List[Path]:
-    """Split video into clips using accurate frame-level re-encoding.
-
-    Uses -preset ultrafast for speed while maintaining perfect accuracy.
-    """
+    """Split video into clips. Uses copy mode first, falls back to re-encode."""
     total_duration = await get_duration(input_path)
     total_clips = math.ceil(total_duration / clip_duration)
     ext = input_path.suffix or ".mp4"
     clips: List[Path] = []
+    bitrate = await get_video_bitrate(input_path)
 
     for idx in range(total_clips):
         start = idx * clip_duration
@@ -78,26 +126,25 @@ async def split_video(
 
         await status_callback(f"Splitting... Part {idx + 1}/{total_clips}")
 
-        # Accurate frame-level cutting with re-encode
-        # -ss after -i = accurate seek (decodes every frame)
-        # -preset ultrafast = fastest encoding, minimal CPU
-        cmd = [
+        # Try copy mode first (fast, preserves original size)
+        cmd_copy = [
             config.FFMPEG, "-y",
-            "-i", str(input_path),
             "-ss", str(start),
+            "-i", str(input_path),
             "-t", str(duration),
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "23",
-            "-c:a", "aac",
-            "-b:a", "192k",
-            "-pix_fmt", "yuv420p",
-            "-movflags", "+faststart",
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
             "-fflags", "+genpts",
             str(output_path),
         ]
 
-        await _run(cmd, timeout=600)
+        try:
+            await _run(cmd_copy, timeout=300)
+        except FFmpegError:
+            logger.warning("Copy split failed for part %d, re-encoding with bitrate %s...", idx + 1, bitrate)
+            cmd_reencode = _build_reencode_cmd(input_path, output_path, start, duration, bitrate)
+            await _run(cmd_reencode, timeout=300)
+
         clips.append(output_path)
 
     return clips
@@ -108,10 +155,7 @@ async def merge_videos(
     output_path: Path,
     status_callback,
 ) -> Path:
-    """Merge clips with FFmpeg concat demuxer using re-encode.
-
-    Re-encoding fixes all timestamp discontinuities and ensures smooth playback.
-    """
+    """Merge clips. Uses copy mode first, falls back to re-encode."""
     if not clip_paths:
         raise FFmpegError("No clips provided")
 
@@ -123,23 +167,43 @@ async def merge_videos(
 
     await status_callback("Merging clips...")
 
-    cmd = [
+    # Try copy mode first (fast, preserves original size)
+    cmd_copy = [
         config.FFMPEG, "-y",
         "-f", "concat",
         "-safe", "0",
         "-i", str(list_path),
-        "-c:v", "libx264",
-        "-preset", "ultrafast",
-        "-crf", "23",
-        "-c:a", "aac",
-        "-b:a", "192k",
-        "-pix_fmt", "yuv420p",
+        "-c", "copy",
         "-movflags", "+faststart",
         str(output_path),
     ]
 
     try:
-        await _run(cmd, timeout=900)
+        await _run(cmd_copy, timeout=600)
+    except FFmpegError:
+        logger.warning("Copy merge failed, re-encoding...")
+        # Use bitrate from first clip to keep size similar
+        bitrate = await get_video_bitrate(clip_paths[0])
+        cmd_reencode = [
+            config.FFMPEG, "-y",
+            "-f", "concat",
+            "-safe", "0",
+            "-i", str(list_path),
+            "-c:v", "libx264",
+            "-preset", "fast",
+        ]
+        if bitrate:
+            cmd_reencode += ["-b:v", str(bitrate)]
+        else:
+            cmd_reencode += ["-crf", "23"]
+        cmd_reencode += [
+            "-c:a", "aac",
+            "-b:a", "128k",
+            "-pix_fmt", "yuv420p",
+            "-movflags", "+faststart",
+            str(output_path),
+        ]
+        await _run(cmd_reencode, timeout=600)
     finally:
         list_path.unlink(missing_ok=True)
 
