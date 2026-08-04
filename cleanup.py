@@ -9,7 +9,6 @@ import config
 
 logger = logging.getLogger(__name__)
 
-
 def cleanup_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Remove all temporary files for the current user session."""
     user = update.effective_user
@@ -23,6 +22,5 @@ def cleanup_session(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
         except Exception as exc:
             logger.warning("Cleanup failed for %s: %s", user_dir, exc)
 
-    for key in ("split_duration", "merge_clips", "merge_count"):
+    for key in ("split_duration", "merge_clips", "merge_count", "timeline_video_path"):
         context.user_data.pop(key, None)
-      
