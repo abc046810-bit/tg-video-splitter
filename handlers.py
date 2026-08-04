@@ -17,7 +17,7 @@ from telegram.ext import (
 import config
 from cleanup import cleanup_session
 from download import download_video
-from ffmpeg_utils import FFmpegError, merge_videos, split_video, parse_time_ranges, cut_timeline_clips
+from ffmpeg_utils import FFmpegError, merge_videos, split_video, get_duration, parse_time_ranges, cut_timeline_clips
 from upload import upload_clips
 from utils import is_supported_format
 from states import BotState
