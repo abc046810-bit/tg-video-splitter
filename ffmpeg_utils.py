@@ -11,11 +11,9 @@ import config
 
 logger = logging.getLogger(__name__)
 
-
 class FFmpegError(Exception):
     """Raised when FFmpeg/FFprobe fails."""
     pass
-
 
 async def _run(cmd: List[str], timeout: int = 600) -> str:
     """Run an FFmpeg command asynchronously."""
@@ -37,7 +35,6 @@ async def _run(cmd: List[str], timeout: int = 600) -> str:
 
     return stdout.decode("utf-8", errors="ignore")
 
-
 async def get_duration(path: Path) -> float:
     """Return video duration in seconds."""
     cmd = [
@@ -54,7 +51,6 @@ async def get_duration(path: Path) -> float:
     if duration <= 0:
         raise FFmpegError("Video duration is zero or negative")
     return duration
-
 
 async def get_video_bitrate(path: Path) -> Optional[int]:
     """Return video stream bitrate in bits per second."""
@@ -73,7 +69,6 @@ async def get_video_bitrate(path: Path) -> Optional[int]:
         except ValueError:
             pass
     return None
-
 
 def _build_reencode_cmd(
     input_path: Path,
@@ -103,7 +98,6 @@ def _build_reencode_cmd(
         str(output_path),
     ]
     return cmd
-
 
 async def split_video(
     input_path: Path,
@@ -148,7 +142,6 @@ async def split_video(
         clips.append(output_path)
 
     return clips
-
 
 async def merge_videos(
     clip_paths: List[Path],
@@ -208,3 +201,115 @@ async def merge_videos(
         list_path.unlink(missing_ok=True)
 
     return output_path
+
+
+# ---------------------------------------------------------------------------
+#  NEW: Multi Timeline Clip Cutter helpers
+# ---------------------------------------------------------------------------
+
+def _parse_time(text: str) -> float:
+    """Parse time string to seconds. Supports HH:MM:SS, MM:SS, or raw seconds."""
+    text = text.strip()
+    if ":" in text:
+        parts = text.split(":")
+        if len(parts) == 3:
+            h, m, s = parts
+            return int(h) * 3600 + int(m) * 60 + float(s)
+        elif len(parts) == 2:
+            m, s = parts
+            return int(m) * 60 + float(s)
+        else:
+            raise ValueError(f"Invalid time format: {text}")
+    else:
+        return float(text)
+
+
+def parse_time_ranges(text: str, max_duration: float):
+    """Parse time ranges from text. Returns list of (start, end) tuples.
+
+    Supports formats like:
+      00:07-00:15
+      00:25-00:40
+      01:10-01:30
+
+      7-15
+      25-40
+      70-90
+
+      00:07-00:15,00:25-00:40,01:10-01:30
+    """
+    # Normalize: replace commas with newlines, then split by newlines
+    text = text.replace(",", "\n")
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+
+    ranges = []
+    for line in lines:
+        if "-" not in line:
+            raise ValueError(f'Invalid range format (missing "-"): {line}')
+        parts = line.split("-")
+        if len(parts) != 2:
+            raise ValueError(f"Invalid range format: {line}")
+        start = _parse_time(parts[0])
+        end = _parse_time(parts[1])
+
+        if start >= end:
+            raise ValueError(f"Start time must be less than end time: {line}")
+        if start < 0 or end < 0:
+            raise ValueError(f"Times cannot be negative: {line}")
+        if end > max_duration:
+            raise ValueError(
+                f"End time ({end:.2f}s) exceeds video duration ({max_duration:.2f}s): {line}"
+            )
+        if start > max_duration:
+            raise ValueError(
+                f"Start time ({start:.2f}s) exceeds video duration ({max_duration:.2f}s): {line}"
+            )
+
+        ranges.append((start, end))
+
+    if not ranges:
+        raise ValueError("No valid ranges found.")
+
+    return ranges
+
+
+async def cut_timeline_clips(
+    input_path: Path,
+    output_dir: Path,
+    ranges: List[tuple],
+    status_callback,
+) -> List[Path]:
+    """Cut video into timeline clips. Uses copy mode first, falls back to re-encode."""
+    ext = input_path.suffix or ".mp4"
+    clips: List[Path] = []
+    bitrate = await get_video_bitrate(input_path)
+    total = len(ranges)
+
+    for idx, (start, end) in enumerate(ranges, 1):
+        duration = end - start
+        output_path = output_dir / f"Clip_{idx:02d}{ext}"
+
+        await status_callback(f"Creating Clip {idx}/{total}...")
+
+        # Try copy mode first (fast, preserves original quality / audio / resolution / FPS)
+        cmd_copy = [
+            config.FFMPEG, "-y",
+            "-ss", str(start),
+            "-i", str(input_path),
+            "-t", str(duration),
+            "-c", "copy",
+            "-avoid_negative_ts", "make_zero",
+            "-fflags", "+genpts",
+            str(output_path),
+        ]
+
+        try:
+            await _run(cmd_copy, timeout=300)
+        except FFmpegError:
+            logger.warning("Copy cut failed for clip %d, re-encoding with bitrate %s...", idx, bitrate)
+            cmd_reencode = _build_reencode_cmd(input_path, output_path, start, duration, bitrate)
+            await _run(cmd_reencode, timeout=300)
+
+        clips.append(output_path)
+
+    return clips
